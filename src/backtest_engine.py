@@ -763,7 +763,7 @@ class OptionsBacktester:
             'trades': trades
         }
     
-    def run_optimization(self, max_workers=None, batch_size=20):
+    def run_optimization(self, max_workers=None, batch_size=10):
         """
         Run brute-force optimization across all parameter
         combinations in parallel using multiprocessing with batching.

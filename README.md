@@ -24,7 +24,8 @@ A options backtesting engine that tests multiple parameter combinations to find 
 
 3. **Run backtesting**:
    ```bash
-   python run_backtest.py
+   cd src
+   python main.py
    ```
 
 ## Data Format
@@ -82,12 +83,10 @@ aux/
 src/
 ├── backtest_engine.py         # Core backtesting logic (reads config)
 └── main.py                    # Parameter grid and execution
-└── test_implementation.py     # test file
 └── config.yaml                # All parameter ranges and fees (edit here)
 └── Nifty-Index-Monthly-Data.parquet
 └── Nifty-Options-Weekly.parquet
 README.md
 requirements.txt               # dependencies
 workflow.jpg
-test_example.jpg
 ```

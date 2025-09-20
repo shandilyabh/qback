@@ -2,13 +2,13 @@
 
 # Entry/exit times (in HH:MM format)
 entry_times:
-  # - "09:16"
-  # - "09:17"
+  - "09:16"
+  - "09:17"
   - "09:23"
 exit_times:
-  # - "15:21"
+  - "15:21"
   - "15:22"
-  # - "15:17"
+  - "15:17"
 
 # Strike offsets (ATM, 1-4 OTM)
 strike_offsets: [0, 1, 2] # [0, 1, 2, 3, 4]
@@ -17,7 +17,7 @@ strike_offsets: [0, 1, 2] # [0, 1, 2, 3, 4]
 option_types: ["CE", "PE", "BOTH"]
 
 # Max re-entries
-max_re_entries: [0, 1]
+max_re_entries: [2, 3, 4]
 
 # Re-entry strategies
 re_entry_types:
@@ -30,8 +30,8 @@ re_entry_types:
 
 # Stop-loss types and their corresponding test values
 stop_loss:
-  percent_premium: [10, 20, 30, 50] # [10, 15, 20, 25, 30, 50] % of Premium
-  points: [10, 20, 30, 50] # [10, 15, 20, 25, 30, 50] Premium Points (₹)
+  percent_premium: [10, 20, 30] # [10, 15, 20, 25, 30, 50] % of Premium
+  points: [10, 20, 30] # [10, 15, 20, 25, 30, 50] Premium Points (₹)
   points_index: [50, 100, 150] # [25, 50, 75, 100, 150] Underlying Points
   percent_index: [1.0, 1.5, 3.0]  # [0.5, 1.0, 1.5, 2.0, 3.0] Underlying % Move
 
