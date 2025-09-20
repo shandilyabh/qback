@@ -27,6 +27,18 @@ A options backtesting engine that tests multiple parameter combinations to find 
    python run_backtest.py
    ```
 
+## Test Implementation Example for Features
+This project includes a test implementation script `src/test_implementation.py` that verifies key features of the backtesting engine. The tests cover:
+- Strike selection logic
+- Stop-loss mechanisms
+- Re-entry strategies
+- Independent Leg Management
+- DTE Filtering
+- Metric Calculation & Filtering
+
+![Test Example](test_example.jpg)
+
+
 ## Data Format
 
 ### Index Data (CSV)

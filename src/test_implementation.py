@@ -24,7 +24,7 @@ def test_strike_selection():
     # Verify it's a valid strike interval
     strike_interval = backtester.config.get('strike_interval', 50)
     assert atm_strike % strike_interval == 0, f"Strike {atm_strike} not aligned to interval {strike_interval}"
-    print("✓ Strike selection working correctly")
+    print("[.] Strike selection working correctly")
 
 def test_stop_loss_types():
     """Test all stop-loss types"""
@@ -59,7 +59,7 @@ def test_stop_loss_types():
     sl_hit = backtester._check_sl(position, 100, 'percent_index', 0.2, 19840)
     assert sl_hit == True, "Percent index SL should trigger for CE"
     
-    print("✓ All stop-loss types working correctly")
+    print("[.] All stop-loss types working correctly")
 
 def test_re_entry_logic():
     """Test re-entry logic"""
@@ -94,11 +94,11 @@ def test_re_entry_logic():
         )
         
         if reentry:
-            print("✓ ASAP re-entry working")
+            print("[.] ASAP re-entry working")
         else:
-            print("⚠ ASAP re-entry returned None (may be due to data)")
+            print("[X] ASAP re-entry returned None (may be due to data)")
     
-    print("✓ Re-entry logic implemented")
+    print("[-.-] Re-entry logic implemented")
 
 def test_independent_legs():
     """Test independent CE/PE leg management"""
@@ -122,9 +122,9 @@ def test_independent_legs():
         pe_trades = [t for t in trades if t['option_type'] == 'PE']
         
         print(f"CE trades: {len(ce_trades)}, PE trades: {len(pe_trades)}")
-        print("✓ Independent leg management working")
+        print("[.] Independent leg management working")
     else:
-        print("⚠ No trades generated (may be due to data or parameters)")
+        print("[x] No trades generated (may be due to data or parameters)")
 
 def test_dte_filtering():
     """Test DTE filtering"""
@@ -146,7 +146,7 @@ def test_dte_filtering():
         else:
             print(f"DTE {dte}: No matching expiry found")
     
-    print("✓ DTE filtering implemented")
+    print("[.] DTE filtering implemented")
 
 def test_config_completeness():
     """Test that config includes all required parameters"""
@@ -171,7 +171,7 @@ def test_config_completeness():
     # Check re-entry types
     assert 'BOTH' in config['option_types'], "Missing BOTH option type"
     
-    print("✓ Config includes all required parameters")
+    print("[.] Config includes all required parameters")
 
 def test_filtering_criteria():
     """Test filtering criteria"""
@@ -202,7 +202,7 @@ def test_filtering_criteria():
     
     print(f"Expected passing strategies: {expected_passing}")
     print(f"Actual passing strategies: {actual_passing}")
-    print("✓ Filtering criteria working correctly")
+    print("[.] Filtering criteria working correctly")
 
 def run_comprehensive_test():
     """Run a comprehensive test of the entire system"""
@@ -220,22 +220,22 @@ def run_comprehensive_test():
         test_filtering_criteria()
         
         print("\n" + "="*50)
-        print("✅ ALL TESTS PASSED - IMPLEMENTATION COMPLETE")
+        print("[---.---] ALL TESTS PASSED - IMPLEMENTATION COMPLETE")
         print("="*50)
         
         print("\nImplemented Features:")
-        print("✓ LTP-based strike selection with proper rounding")
-        print("✓ All 4 stop-loss types (premium %, points, index %, index points)")
-        print("✓ Complete re-entry logic (6 types + NO_REENTRY)")
-        print("✓ Independent CE/PE leg management")
-        print("✓ DTE filtering and expiry matching")
-        print("✓ AlgoTest-style filtering with all 7 criteria")
-        print("✓ Proper output file naming")
-        print("✓ BOTH option type for simultaneous CE/PE")
-        print("✓ Enhanced configuration with all parameters")
+        print("[>] LTP-based strike selection with proper rounding")
+        print("[>] All 4 stop-loss types (premium %, points, index %, index points)")
+        print("[>] Complete re-entry logic (6 types + NO_REENTRY)")
+        print("[>] Independent CE/PE leg management")
+        print("[>] DTE filtering and expiry matching")
+        print("[>] AlgoTest-style filtering with all 7 criteria")
+        print("[>] Proper output file naming")
+        print("[>] BOTH option type for simultaneous CE/PE")
+        print("[>] Enhanced configuration with all parameters")
         
     except Exception as e:
-        print(f"\n❌ TEST FAILED: {e}")
+        print(f"\n[xxx] TEST FAILED: {e}")
         import traceback
         traceback.print_exc()
 

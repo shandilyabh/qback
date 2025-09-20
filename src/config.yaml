@@ -3,11 +3,12 @@
 # Entry/exit times (in HH:MM format)
 entry_times:
   - "09:16"
-  # - "09:17"
-  # - "09:18"
+  - "09:17"
+  - "09:23"
 exit_times:
   - "15:21"
-  # - "15:22"
+  - "15:22"
+  - "15:17"
 
 # Strike offsets (ATM, 1-4 OTM)
 strike_offsets: [0, 1, 2, 3, 4]
