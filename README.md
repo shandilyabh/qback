@@ -101,4 +101,5 @@ src/
 README.md
 requirements.txt               # dependencies
 workflow.jpg
+test_example.jpg
 ```
