@@ -1,0 +1,46 @@
+# qback configuration file
+
+# Entry/exit times (in HH:MM format)
+entry_times:
+  - "09:16"
+  # - "09:17"
+  # - "09:18"
+exit_times:
+  - "15:21"
+  # - "15:22"
+
+# Strike offsets (ATM, 1-4 OTM)
+strike_offsets: [0, 1, 2, 3, 4]
+
+# Option types
+option_types: ["CE", "PE", "BOTH"]
+
+# Max re-entries
+max_re_entries: [0, 1]
+
+# Re-entry strategies
+re_entry_types:
+  - RE-ASAP
+  - RE-ASAP_REVERSE
+  - RE-COST
+  - RE-COST_REVERSE
+  - RE-MOMENTUM
+  - RE-MOMENTUM_REVERSE
+
+# Stop-loss types and their corresponding test values
+stop_loss:
+  percent_premium: [10, 15, 20, 25, 30, 50]     # % of Premium
+  points: [10, 15, 20, 25, 30, 50]              # Premium Points (₹)
+  points_index: [25, 50, 75, 100, 150]          # Underlying Points
+  percent_index: [0.5, 1.0, 1.5, 2.0, 3.0]     # Underlying % Move
+
+# Fees and slippage
+brokerage_per_trade: 20      # INR per trade (round trip)
+transaction_fee_per_lot: 2   # INR per lot per trade
+slippage_perc: 0.05          # 5% slippage on entry/exit
+
+# NIFTY strike interval
+strike_interval: 50
+
+# DTE buckets or values to test (in days)
+dte_list: [0, 1, 2, 3, 5, 6, 7]
