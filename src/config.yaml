@@ -2,16 +2,16 @@
 
 # Entry/exit times (in HH:MM format)
 entry_times:
-  - "09:16"
-  - "09:17"
+  # - "09:16"
+  # - "09:17"
   - "09:23"
 exit_times:
-  - "15:21"
+  # - "15:21"
   - "15:22"
-  - "15:17"
+  # - "15:17"
 
 # Strike offsets (ATM, 1-4 OTM)
-strike_offsets: [0, 1, 2, 3, 4]
+strike_offsets: [0, 1, 2] # [0, 1, 2, 3, 4]
 
 # Option types
 option_types: ["CE", "PE", "BOTH"]
@@ -30,10 +30,10 @@ re_entry_types:
 
 # Stop-loss types and their corresponding test values
 stop_loss:
-  percent_premium: [10, 15, 20, 25, 30, 50]     # % of Premium
-  points: [10, 15, 20, 25, 30, 50]              # Premium Points (₹)
-  points_index: [25, 50, 75, 100, 150]          # Underlying Points
-  percent_index: [0.5, 1.0, 1.5, 2.0, 3.0]     # Underlying % Move
+  percent_premium: [10, 20, 30, 50] # [10, 15, 20, 25, 30, 50] % of Premium
+  points: [10, 20, 30, 50] # [10, 15, 20, 25, 30, 50] Premium Points (₹)
+  points_index: [50, 100, 150] # [25, 50, 75, 100, 150] Underlying Points
+  percent_index: [1.0, 1.5, 3.0]  # [0.5, 1.0, 1.5, 2.0, 3.0] Underlying % Move
 
 # Fees and slippage
 brokerage_per_trade: 20      # INR per trade (round trip)
@@ -43,5 +43,32 @@ slippage_perc: 0.05          # 5% slippage on entry/exit
 # NIFTY strike interval
 strike_interval: 50
 
-# DTE buckets or values to test (in days)
-dte_list: [0, 1, 2, 3, 5, 6, 7]
+# DTE values to test
+dte_list: [2, 5]  # 2-day, weekly expiry | Original full range: [0, 1, 2, 3, 6]
+
+
+# Initial position direction (False = SHORT, True = LONG)
+initial_position_long: False
+
+# Portfolio capital management (INR)
+portfolio_capital: 500000  # Total portfolio size
+min_capital: 10000         # Minimum capital per strategy
+
+filtration_criteria:
+  # Original 3-year criteria (commented out):
+  # min_roi: 100              # 100% ROI over 3 years
+  # min_return_mdd: 6.0       # Return/MDD ratio >= 6.0
+  # min_reward_risk: 1.2      # Reward:Risk >= 1.2
+  # min_expectancy: 0.4       # Expectancy >= 0.4%
+  # min_win_rate: 62          # Win rate >= 62%
+  # min_avg_profit_per_period: 0.3  # Avg profit per period >= 0.3%
+  # max_drawdown: 5.0         # Max drawdown <= 5.0%
+  
+  # Time-adjusted criteria for 1-month backtest:
+  min_roi: 2.5              # 2.5% ROI per month (100%/40 months ≈ 2.5%)
+  min_return_mdd: 4.0       # Return/MDD ratio >= 4.0 (moderate for medium period)
+  min_reward_risk: 1.1      # Reward:Risk >= 1.1 (slightly relaxed)
+  min_expectancy: 0.3       # Expectancy >= 0.3% (per-trade metric, moderate)
+  min_win_rate: 58          # Win rate >= 58% (moderate requirement)
+  min_avg_profit_per_period: 0.08  # Avg profit per period >= 0.08% (monthly)
+  max_drawdown: 3.0         # Max drawdown <= 3.0% (reasonable for 1-month)

@@ -25,7 +25,7 @@ def main(config_path="config.yaml"):
 
     if not filtered_results.empty:
         print(f"\nFound {len(filtered_results)} viable strategies:")
-        print(filtered_results[['run_id', 'roi', 'win_rate', 'max_drawdown', 'total_trades']].head(10))
+        print(filtered_results[['strategy_id', 'batch_id', 'run_id', 'roi', 'win_rate', 'max_drawdown', 'total_trades']].head(10))
         
         # Save filtered results
         filtered_results.to_csv('filtered_strategies.csv', index=False)
