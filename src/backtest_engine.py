@@ -7,22 +7,26 @@ from tqdm import tqdm
 import yaml
 import concurrent.futures
 
-def _run_strategy_batch_worker(args):
+# Global variable to hold the backtester instance in each worker process
+backtester_instance = None
+
+def _init_worker(options_path, index_path, config_path):
+    """Initializer for each worker process to create a single backtester instance."""
+    global backtester_instance
+    from backtest_engine import OptionsBacktester
+    backtester_instance = OptionsBacktester(options_path, index_path, config_path)
+
+def _run_strategy_batch_worker(params_batch):
     """
     Worker function for parallel execution of a batch of parameter sets.
-    
-    [args]
-    args: (params_batch, options_data_path, index_data_path, config_path)
-    
-    [returns]
-    list of metrics dicts for each parameter set in the batch
+    It now uses the global backtester_instance initialized for the worker.
     """
-    params_batch, options_data_path, index_data_path, config_path = args
-    from backtest_engine import OptionsBacktester
-    backtester = OptionsBacktester(index_data_path, options_data_path, config_path)
+    if backtester_instance is None:
+        raise RuntimeError("Worker process not initialized correctly.")
+    
     results = []
     for params in params_batch:
-        result = backtester.run_single_strategy(params)
+        result = backtester_instance.run_single_strategy(params)
         result.update(params)
         results.append(result)
     return results
@@ -37,7 +41,7 @@ class OptionsBacktester:
     - Supports full parameter grid-search.
     - Manages CE and PE legs independently, including all re-entry strategies.
     - Computes detailed performance metrics (ROI, max drawdown, reward:risk, expectancy, etc.) for each parameter combination.
-    - Parallelizes backtest runs.
+    - Parallelizes & batches backtest runs.
     - Provides filtering for viable strategies.
 
     Usage:
@@ -45,7 +49,7 @@ class OptionsBacktester:
         results_df = backtester.run_optimization()
         filtered_df = backtester.filter_results(results_df)
     """
-    def __init__(self, options_data_path, index_data_path, config_path="../config.yaml"):
+    def __init__(self, options_data_path, index_data_path, config_path="config.yaml"):
         self.index_data_path = index_data_path
         self.options_data_path = options_data_path
         self.config_path = config_path
@@ -88,7 +92,7 @@ class OptionsBacktester:
         try:
             index_price = self.index_data.loc[timestamp, 'index_close']
         except KeyError:
-            return "No Index price was found for the given timestamp in index data"
+            return None
         
         # Find all available strikes at this timestamp
         available_strikes = set()
@@ -165,16 +169,14 @@ class OptionsBacktester:
                     exit_price = trade['exit_price'] * (1 + slippage)
 
                 brokerage = self.config.get('brokerage_per_trade', 0)
-                txn_fee = self.config.get('transaction_fee_per_lot', 0)
-                total_fees = brokerage + txn_fee
 
                 if trade.get('is_long', False):  # LONG position
-                    trade['pnl'] = exit_price - entry_price - total_fees
+                    trade['pnl'] = exit_price - entry_price - brokerage
                 else:  # SHORT position (default)
-                    trade['pnl'] = entry_price - exit_price - total_fees
+                    trade['pnl'] = entry_price - exit_price - brokerage
                 trade['entry_price_slip'] = entry_price
                 trade['exit_price_slip'] = exit_price
-                trade['total_fees'] = total_fees
+                trade['total_fees'] = brokerage
             trades.extend(daily_trades)
 
         return self._calculate_metrics(trades)
@@ -227,27 +229,39 @@ class OptionsBacktester:
         if atm_strike is None:
             return trades
 
-        # for determining target strike based on offset  
-        target_strike = atm_strike + (strike_offset * self.strike_interval)
-        available_strikes = set(key[2] for key in self._option_price_dict.keys() if key[0] == entry_timestamp)
-        if not available_strikes:
-            ''' trying for nearby timestamps '''
-            for key in self._option_price_dict.keys():
-                if abs((key[0] - entry_timestamp).total_seconds()) <= 300:
-                    available_strikes.add(key[2])
-        if available_strikes:
-            ''' find closest available strike to target '''
-            target_strike = min(available_strikes, key=lambda x: abs(x - target_strike))
-        
         # Initialize independent leg states with original leg tracking
         leg_states = {}
         for leg in legs:
-            entry_price = self.get_option_price(entry_timestamp, expiry_for_dte, target_strike, leg)
+            # --- Leg-Specific Strike Calculation ---
+            if leg == 'CE':
+                ideal_target_strike = atm_strike + (strike_offset * self.strike_interval)
+            else:  # PE
+                ideal_target_strike = atm_strike - (strike_offset * self.strike_interval)
+
+            # Find available strikes specifically for this leg
+            available_strikes = {key[2] for key in self._option_price_dict.keys() 
+                                 if key[0] == entry_timestamp and key[3] == leg}
+            
+            if not available_strikes:
+                # If no strikes at exact time, search a 5-min window for this leg
+                for key in self._option_price_dict.keys():
+                    if abs((key[0] - entry_timestamp).total_seconds()) <= 300 and key[3] == leg:
+                        available_strikes.add(key[2])
+
+            final_target_strike = None
+            if available_strikes:
+                # Find the closest available strike to the ideal target
+                final_target_strike = min(available_strikes, key=lambda x: abs(x - ideal_target_strike))
+            
+            entry_price = None
+            if final_target_strike is not None:
+                entry_price = self.get_option_price(entry_timestamp, expiry_for_dte, final_target_strike, leg)
+
             if entry_price is not None:
                 leg_states[leg] = {
                     'position': {
                         'entry_time': entry_timestamp,
-                        'strike': target_strike,
+                        'strike': final_target_strike,
                         'entry_price': entry_price,
                         'option_type': leg,
                         'expiry': expiry_for_dte,
@@ -257,8 +271,8 @@ class OptionsBacktester:
                     },
                     're_entry_count': 0,
                     'pending_reentry': None,
-                    'original_leg': leg,  # Track original leg for _REVERSE logic
-                    'original_is_long': self.config.get('initial_position_long', False)  # Track original direction
+                    'original_leg': leg,
+                    'original_is_long': self.config.get('initial_position_long', False)
                 }
             else:
                 leg_states[leg] = {
@@ -280,14 +294,17 @@ class OptionsBacktester:
             for leg in legs:
                 leg_state = leg_states[leg]
                 
-                # Handle pending re-entries
-                if leg_state['pending_reentry'] is not None:
-                    pending = leg_state.get('pending_reentry', None)
-                    if self._check_reentry_condition(pending, expiry_for_dte, timestamp, day_index):
-                        leg_state['position'] = pending['position']
+                # Handle pending re-entries first
+                if leg_state.get('pending_reentry'):
+                    new_position = self._check_reentry_condition(
+                        leg_state['pending_reentry'], timestamp, day_index, expiry_for_dte
+                    )
+                    if new_position:
+                        leg_state['position'] = new_position
                         leg_state['pending_reentry'] = None
+                        leg_state['re_entry_count'] += 1
                 
-                # Process active position
+                # Process active position if one exists
                 if leg_state['position'] is not None:
                     current_position = leg_state['position']
                     current_price = self.get_option_price(timestamp, expiry_for_dte, current_position['strike'], current_position['option_type'])
@@ -318,17 +335,15 @@ class OptionsBacktester:
                                     day_index, expiry_for_dte, leg_state['original_leg'], 
                                     leg_state['original_is_long'], dte
                                 )
-                                if reentry_result:
-                                    if re_entry_type in ['RE-COST', 'RE-COST_REVERSE', 'RE-MOMENTUM', 'RE-MOMENTUM_REVERSE']:
-                                        leg_state['pending_reentry'] = {
-                                            'type': re_entry_type,
-                                            'position': reentry_result,
-                                            'original_position': current_position
-                                        }
-                                    else:
-                                        leg_state['position'] = reentry_result
-                                    leg_state['re_entry_count'] += 1
+                                
+                                # For RE-ASAP, re-entry is immediate
+                                if re_entry_type in ['RE-ASAP', 'RE-ASAP_REVERSE']:
+                                    leg_state['position'] = reentry_result
+                                    if reentry_result:
+                                        leg_state['re_entry_count'] += 1
                                 else:
+                                    # For other types, set a pending state
+                                    leg_state['pending_reentry'] = reentry_result
                                     leg_state['position'] = None
                             else:
                                 leg_state['position'] = None
@@ -405,38 +420,81 @@ class OptionsBacktester:
             except Exception:
                 continue
         
-        # Suppressed: DTE fallback warning
-        # if best_expiry and best_diff > 0:
-        #     print(f"Warning: Using fallback expiry with DTE {(pd.to_datetime(best_expiry).date() - timestamp.date()).days} instead of requested {dte}")
-        
         return best_expiry
     
-    def _check_reentry_condition(self, pending_reentry, expiry, timestamp, day_index):
+    def _check_reentry_condition(self, pending_reentry, timestamp, day_index, expiry):
         """
-        Check if pending re-entry condition is met
+        Check if pending re-entry condition is met on a tick-by-tick basis.
 
         [args]
-        pending_reentry: dict with keys - type, position, original_position
-        expiry: str
-        timestamp: pd.Timestamp
+        pending_reentry: dict with re-entry details
+        timestamp: pd.Timestamp (current tick)
         day_index: pd.DataFrame
+        expiry: str
 
         [returns]
-        bool: True if re-entry condition met, else False
+        new_position: dict or None - a new position if conditions are met
         """
-        base_type = pending_reentry['type'].replace("_REVERSE", "")
+        re_entry_type = pending_reentry['type']
+        is_reverse = re_entry_type.endswith("_REVERSE")
+        base_type = re_entry_type.replace("_REVERSE", "")
+        
+        original_pos = pending_reentry['original_position']
+        target_leg = pending_reentry['target_leg']
+        is_long = pending_reentry['is_long']
+        
+        # Get current and previous index locations for momentum/dip checks
+        current_time_loc = day_index.index.get_loc(timestamp)
         
         if base_type == 'RE-COST':
-            position = pending_reentry['position']
-            original_position = pending_reentry['original_position']
-            current_price = self.get_option_price(timestamp, expiry, position['strike'], position['option_type'])
-            return current_price is not None and abs(current_price - original_position['entry_price']) <= 0.5
+            if not is_reverse:
+                # Re-enter the SAME trade if price returns to the original entry cost.
+                current_price = self.get_option_price(timestamp, expiry, original_pos['strike'], target_leg)
+                if current_price is not None and abs(current_price - original_pos['entry_price']) <= 0.5:
+                    return self._create_new_position(timestamp, day_index, expiry, original_pos['strike'], current_price, target_leg, is_long, original_pos['dte'])
+            else:
+                # Buy the dip" or "Sell the rally": reversal
+                if current_time_loc >= 1:
+                    current_index_price = day_index.iloc[current_time_loc]['index_close']
+                    prev_index_price = day_index.iloc[current_time_loc - 1]['index_close']
+                    
+                    # If new trade is a Long Call (bullish), wait for a dip (price falls).
+                    if target_leg == 'CE' and current_index_price < prev_index_price:
+                        return self._create_reentry_position_at_atm(timestamp, day_index, expiry, target_leg, is_long, original_pos['dte'])
+                        
+                    # If new trade is a Long Put (bearish), wait for a bounce (price rises).
+                    elif target_leg == 'PE' and current_index_price > prev_index_price:
+                        return self._create_reentry_position_at_atm(timestamp, day_index, expiry, target_leg, is_long, original_pos['dte'])
+
+        elif base_type == 'RE-MOMENTUM':
+            if current_time_loc >= 2:
+                price1 = day_index.iloc[current_time_loc - 2]['index_close']
+                price2 = day_index.iloc[current_time_loc - 1]['index_close']
+                price3 = day_index.iloc[current_time_loc]['index_close'] # current price
+                
+                upward_momentum = price3 > price2 > price1
+                downward_momentum = price3 < price2 < price1
+                
+                if not is_reverse:
+                    # Re-enter on any momentum.
+                    if upward_momentum or downward_momentum:
+                        return self._create_reentry_position_at_atm(timestamp, day_index, expiry, target_leg, is_long, original_pos['dte'])
+                else:
+                    # Wait for momentum that CONFIRMS the new market view.
+                    # If new trade is a Long Call (bullish), require upward momentum.
+                    if target_leg == 'CE' and upward_momentum:
+                        return self._create_reentry_position_at_atm(timestamp, day_index, expiry, target_leg, is_long, original_pos['dte'])
+                    
+                    # If new trade is a Long Put (bearish), require downward momentum.
+                    elif target_leg == 'PE' and downward_momentum:
+                        return self._create_reentry_position_at_atm(timestamp, day_index, expiry, target_leg, is_long, original_pos['dte'])
         
-        return True  # RE-MOMENTUM and RE-ASAP are always ready
+        return None
     
     def _handle_reentry(self, exited_position, exit_timestamp, re_entry_type, day_index, expiry, original_leg, original_is_long, dte):
         """
-        Handle re-entry logic based on canonical re-entry types
+        Handle re-entry logic. For RE-ASAP, it returns a new position immediately.
+        For other types, it returns a dictionary defining the pending re-entry condition.
         
         [args]
         exited_position: dict
@@ -449,135 +507,65 @@ class OptionsBacktester:
         dte: int
         
         [returns]
-        new_position: dict or None
+        new_position (dict) or pending_reentry_details (dict) or None
         """
         is_reverse = re_entry_type.strip().endswith("_REVERSE")
         base_type = re_entry_type.replace("_REVERSE", "")
         
-        if is_reverse:
-            target_leg = 'PE' if original_leg == 'CE' else 'CE'
-            is_long = not original_is_long
-        else:
-            target_leg = original_leg
-            is_long = original_is_long
+        target_leg = original_leg
+        is_long = original_is_long
 
+        if is_reverse:
+            # Flip market opinion
+            if original_leg == "CE" and not original_is_long:  
+                # Short Call → Long Call
+                target_leg, is_long = "CE", True
+            elif original_leg == "PE" and not original_is_long:  
+                # Short Put → Long Put
+                target_leg, is_long = "PE", True
+            elif original_leg == "CE" and original_is_long:  
+                # Long Call → Short Call
+                target_leg, is_long = "CE", False
+            elif original_leg == "PE" and original_is_long:  
+                # Long Put → Short Put
+                target_leg, is_long = "PE", False
+            
         if base_type == 'RE-ASAP':
             # Immediate re-entry at current ATM
-            current_index_price = day_index.loc[exit_timestamp, 'index_close']
-            new_atm_strike = self.get_atm_strike_from_ltp(exit_timestamp)
-            new_entry_price = self.get_option_price(exit_timestamp, expiry, new_atm_strike, target_leg)
-            if new_entry_price is not None:
-                return {
-                    'entry_time': exit_timestamp,
-                    'strike': new_atm_strike,
-                    'entry_price': new_entry_price,
-                    'option_type': target_leg,
-                    'expiry': expiry,
-                    'dte': dte,
-                    'entry_index_price': current_index_price,
-                    'is_long': is_long
-                }
+            return self._create_reentry_position_at_atm(exit_timestamp, day_index, expiry, target_leg, is_long, dte)
 
-        elif base_type == 'RE-COST':
-            # Wait until original strike returns to original entry price
-            return self._wait_for_cost_reentry(exited_position, exit_timestamp, day_index, expiry, target_leg, dte, is_long)
-
-        elif base_type == 'RE-MOMENTUM':
-            # Wait for momentum condition
-            return self._wait_for_momentum_reentry(exited_position, exit_timestamp, day_index, expiry, target_leg, dte, is_long)
+        elif base_type in ['RE-COST', 'RE-MOMENTUM']:
+            # Return a dictionary that defines the pending state
+            return {
+                'type': re_entry_type,
+                'original_position': exited_position,
+                'target_leg': target_leg,
+                'is_long': is_long
+            }
 
         return None
     
-    def _wait_for_cost_reentry(self, exited_position, exit_timestamp, day_index, expiry, target_leg, dte, is_long):
-        """
-        Wait for original strike to return to (<= 0.5 pts) original entry price
-        
-        [args]
-        exited_position: dict
-        exit_timestamp: pd.Timestamp
-        day_index: pd.DataFrame
-        expiry: str
-        target_leg: str ("CE" or "PE")
-        dte: int
-        is_long: bool
+    def _create_new_position(self, timestamp, day_index, expiry, strike, entry_price, option_type, is_long, dte):
+        """Helper to create a new position dictionary."""
+        return {
+            'entry_time': timestamp,
+            'strike': strike,
+            'entry_price': entry_price,
+            'option_type': option_type,
+            'expiry': expiry,
+            'dte': dte,
+            'entry_index_price': day_index.loc[timestamp, 'index_close'],
+            'is_long': is_long
+        }
 
-        [returns]
-        new_position: dict or None
-        """
-        original_strike = exited_position['strike']
-        original_entry_price = exited_position['entry_price']
-        
-        # Check remaining timestamps in the day
-        remaining_timestamps = [ts for ts in day_index.index if ts > exit_timestamp]
-        
-        for timestamp in remaining_timestamps:
-            current_price = self.get_option_price(timestamp, expiry, original_strike, target_leg)
-            if current_price is not None and abs(current_price - original_entry_price) <= 0.5:  # Within 0.5 points
-                current_index_price = day_index.loc[timestamp, 'index_close']
-                return {
-                    'entry_time': timestamp,
-                    'strike': original_strike,
-                    'entry_price': current_price,
-                    'option_type': target_leg,
-                    'expiry': expiry,
-                    'dte': dte,
-                    'entry_index_price': current_index_price,
-                    'is_long': is_long
-                }
-        
+    def _create_reentry_position_at_atm(self, timestamp, day_index, expiry, target_leg, is_long, dte):
+        """Helper to create a new re-entry position at the current ATM strike."""
+        new_atm_strike = self.get_atm_strike_from_ltp(timestamp)
+        new_entry_price = self.get_option_price(timestamp, expiry, new_atm_strike, target_leg)
+        if new_entry_price is not None:
+            return self._create_new_position(timestamp, day_index, expiry, new_atm_strike, new_entry_price, target_leg, is_long, dte)
         return None
-    
-    def _wait_for_momentum_reentry(self, exited_position, exit_timestamp, day_index, expiry, target_leg, dte, is_long):
-        """
-        Wait for momentum condition (simple momentum: 3 consecutive moves in same direction)
-        
-        [args]
-        exited_position: dict
-        exit_timestamp: pd.Timestamp
-        day_index: pd.DataFrame
-        expiry: str
-        target_leg: str ("CE" or "PE")
-        dte: int
-        is_long: bool
 
-        [returns]
-        new_position: dict or None
-        """
-        remaining_timestamps = [ts for ts in day_index.index if ts > exit_timestamp]
-        
-        if len(remaining_timestamps) < 3:
-            return None
-        
-        # Check for 3 consecutive moves in same direction
-        for i in range(len(remaining_timestamps) - 2):
-            ts1, ts2, ts3 = remaining_timestamps[i:i+3]
-            
-            price1 = day_index.loc[ts1, 'index_close']
-            price2 = day_index.loc[ts2, 'index_close']
-            price3 = day_index.loc[ts3, 'index_close']
-            
-            # Check for momentum (3 consecutive moves in same direction)
-            if ((price2 > price1 and price3 > price2) or  # Upward momentum
-                (price2 < price1 and price3 < price2)):    # Downward momentum
-                
-                current_index_price = day_index.loc[ts3, 'index_close']
-                new_atm_strike = self.get_atm_strike_from_ltp(ts3)
-                new_entry_price = self.get_option_price(ts3, expiry, new_atm_strike, target_leg)
-                
-                if new_entry_price is not None:
-                    return {
-                        'entry_time': ts3,
-                        'strike': new_atm_strike,
-                        'entry_price': new_entry_price,
-                        'option_type': target_leg,
-                        'expiry': expiry,
-                        'dte': dte,
-                        'entry_index_price': current_index_price,
-                        'is_long': is_long
-                    }
-        
-        return None
-    
     def _check_sl(self, position, current_price, sl_type, sl_value, current_index_price=None):
         """
         Check if stop loss is hit for both SHORT and LONG positions
@@ -648,55 +636,15 @@ class OptionsBacktester:
 
         return False
     
-    def _calculate_realistic_capital(self, trades):
-        """
-        Calculate realistic capital based on assumed margin requirements
-        
-        [args]
-        trades: list of trade dicts
-        
-        [returns]
-        realistic_capital: float - actual capital required for this strategy
-        """
-        if not trades:
-            return self.config.get('min_capital', 10000)  # Minimum capital
-        
-        max_margin_required = 0
-        portfolio_capital = self.config.get('portfolio_capital', 500000)  # Default ₹5L
-        
-        # Calculate maximum concurrent margin requirement
-        for trade in trades:
-            if trade.get('is_long', False):
-                # LONG positions: capital = premium paid
-                capital_required = trade.get('entry_price_slip', trade['entry_price'])
-            else:
-                # SHORT positions: capital = SPAN + Exposure margin
-                strike = trade.get('strike', 21500)
-                lot_size = 50  # NIFTY lot size
-                notional_value = strike * lot_size
-                
-                # Approximate margin: 15% of notional value
-                margin_required = notional_value * 0.15
-                capital_required = margin_required
-            
-            max_margin_required = max(max_margin_required, capital_required)
-        
-        # Ensure we don't exceed portfolio capital
-        realistic_capital = min(max_margin_required, portfolio_capital)
-        
-        # Ensure minimum capital for meaningful ROI calculation
-        min_capital = self.config.get('min_capital', 10000)
-        return max(realistic_capital, min_capital)
-    
     def _calculate_metrics(self, trades):
         """
-        Calculates performance metrics
-
+        Calculate metrics
+        
         [args]
-        trades: list of dicts representing individual trades
-
+        trades: list of trade dicts with pnl, entry_price, etc.
+        
         [returns]
-        metrics: dict with the required performance metrics
+        metrics: dict with percentage-based metrics
         """
         if not trades:
             return {
@@ -713,55 +661,86 @@ class OptionsBacktester:
             }
         
         df = pd.DataFrame(trades)
-        total_pnl = df['pnl'].sum()
-        win_rate = (df['pnl'] > 0).mean() * 100
-        avg_premium = df['entry_price_slip'].mean() if 'entry_price_slip' in df.columns else 1
-
-        # maximum drawdown
-        cumulative_pnl = df['pnl'].cumsum()
-        running_max = cumulative_pnl.expanding().max()
-        drawdown = running_max - cumulative_pnl
-        max_drawdown = drawdown.max()
-
-        # ROI calculation using realistic margin-based capital model
-        realistic_capital = self._calculate_realistic_capital(trades)
-        roi = (total_pnl / realistic_capital) * 100
-
-        # Reward Risk ratio
-        wins = df[df['pnl'] > 0]['pnl']
-        losses = df[df['pnl'] < 0]['pnl']
-        avg_win = wins.mean() if not wins.empty else 0
-        avg_loss = losses.mean() if not losses.empty else 0
-        reward_risk = (avg_win / abs(avg_loss)) if avg_loss != 0 else 0
-
-        # Expectancy per trade (mean pnl as % of entry)
-        expectancy = (df['pnl'].mean() / avg_premium) * 100 if avg_premium else 0
         
-        # Average profit per period (% of realistic capital per period)
-        periods = df['entry_time'].dt.date.nunique() if 'entry_time' in df.columns else 0
-        if periods > 0:
-            avg_profit_per_period = (total_pnl / (periods * realistic_capital)) * 100
-        else:
-            avg_profit_per_period = 0
-
-        # Max drawdown as % of realistic capital
-        max_drawdown_perc = (max_drawdown / realistic_capital) * 100
-
-        # Return to MDD (max drawdown ratio): return for each unit of downside risk
-        return_mdd_ratio = roi / max(max_drawdown_perc, 1e-6) if max_drawdown_perc > 0 else 0
-
+        # 1. Win Rate (percentage of winning trades)
+        win_rate = (df['pnl'] > 0).mean() * 100
+        
+        # 2. Expectancy per trade (average PnL as % of entry premium)
+        df['pnl_pct'] = (pd.to_numeric(df['pnl'], errors='coerce') / pd.to_numeric(df['entry_price'], errors='coerce')) * 100
+        expectancy = df['pnl_pct'].mean()
+        
+        # 3. Reward:Risk ratio (avg win % / avg loss %)
+        wins = df[df['pnl'] > 0]['pnl_pct']
+        losses = df[df['pnl'] < 0]['pnl_pct']
+        avg_win_pct = wins.mean() if not wins.empty else 0
+        avg_loss_pct = abs(losses.mean()) if not losses.empty else 0
+        reward_risk = (avg_win_pct / avg_loss_pct) if avg_loss_pct > 0 else 0
+        
+        # 4. Cumulative return
+        df['cumulative_pnl_pct'] = df['pnl_pct'].cumsum()
+        
+        # 5. Max Drawdown
+        running_max = df['cumulative_pnl_pct'].expanding().max()
+        drawdown = running_max - df['cumulative_pnl_pct']
+        max_drawdown = drawdown.max()
+        
+        # 6. Total return (cumulative PnL %)
+        total_return_pct = df['cumulative_pnl_pct'].iloc[-1]
+        
+        # 7. Annualized ROI (scale to 3-year equivalent for comparison)
+        days_in_data = df['entry_time'].dt.date.nunique() if 'entry_time' in df.columns else 1
+        
+        # Scale to 3 years (assuming ~250 trading days per year)
+        scaling_factor = (3 * 250) / days_in_data if days_in_data > 0 else 1
+        roi_3yr_equivalent = total_return_pct * scaling_factor
+        
+        # 8. Average Profit per Period (daily average return %)
+        avg_profit_per_period = total_return_pct / days_in_data if days_in_data > 0 else 0
+        
+        # 9. Return to MDD ratio
+        return_mdd_ratio = roi_3yr_equivalent / max(max_drawdown, 0.01) if max_drawdown > 0 else 0
+        
+        # 10. Total PnL (sum of all trade PnLs)
+        total_pnl = df['pnl'].sum()
+        
         return {
-            'roi': roi,
-            'total_pnl': total_pnl,
             'total_trades': len(trades),
+            'total_pnl': total_pnl,
             'win_rate': win_rate,
-            'max_drawdown': max_drawdown_perc,
+            'max_drawdown': max_drawdown,
+            'roi': roi_3yr_equivalent,  # Using 3-year equivalent ROI
             'reward_risk': reward_risk,
             'expectancy': expectancy,
             'avg_profit_per_period': avg_profit_per_period,
             'return_mdd_ratio': return_mdd_ratio,
             'trades': trades
         }
+    
+    def _discover_available_dtes(self):
+        """
+        Discover all available DTEs from the complete options data
+        
+        [returns]
+        dte_list: list of unique DTE values found in data
+        """
+        dte_set = set()
+        
+        # Get all unique timestamps from options data
+        timestamps = {key[0] for key in self._option_price_dict.keys()}
+        
+        for timestamp in timestamps:
+            expiries = {key[1] for key in self._option_price_dict.keys() if key[0] == timestamp}
+            
+            for expiry in expiries:
+                try:
+                    expiry_dt = pd.to_datetime(expiry)
+                    dte = (expiry_dt.date() - timestamp.date()).days
+                    if dte >= 0:  # Only non-expired contracts
+                        dte_set.add(dte)
+                except Exception:
+                    continue
+        
+        return sorted(list(dte_set))
     
     def run_optimization(self, max_workers=None, batch_size=10):
         """
@@ -783,8 +762,10 @@ class OptionsBacktester:
         max_re_entries_list = self.config['max_re_entries']
         re_entry_types = self.config['re_entry_types']
         sl_type_values = self.config['stop_loss']
-        dte_list = self.config.get('dte_list', [0])
+        dte_list = self._discover_available_dtes()
 
+        print(f"Discovered DTEs from data: {dte_list}")
+        
         param_combinations = []
         for sl_type, sl_values in sl_type_values.items():
             for sl_value in sl_values:
@@ -814,11 +795,14 @@ class OptionsBacktester:
                 yield lst[i:i + chunk_size]
 
         results = []
-        job_args = [(batch, self.index_data_path, self.options_data_path, self.config_path)
-                    for batch in chunkify(param_combinations, batch_size)]
+        job_args = list(chunkify(param_combinations, batch_size))
         
         try:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            with concurrent.futures.ProcessPoolExecutor(
+                max_workers=max_workers,
+                initializer=_init_worker,
+                initargs=(self.options_data_path, self.index_data_path, self.config_path)
+            ) as executor:
                 for batch_num, batch_result in enumerate(tqdm(executor.map(_run_strategy_batch_worker, job_args),
                                                       total=len(job_args), desc="Running strategies")):
                     for run_num, r in enumerate(batch_result):
@@ -833,30 +817,87 @@ class OptionsBacktester:
         df = pd.DataFrame(results)
         cols = ['strategy_id'] + [c for c in df.columns if c != 'strategy_id']
         return df[cols]
-    
-    def filter_results(self, results_df):
+
+    def get_best_strategies(self, results_df):
         """
-        Filter results based on time-adjusted criteria from config
+        Calculate a composite score for each strategy and find the best one per DTE.
 
         [args]
-        results_df: pd.DataFrame - results from run_optimization()
+        results_df: pd.DataFrame with results for each parameter combination
 
         [returns]
-        filtered_df: pd.DataFrame - filtered results
+        best_strategies_by_dte: dict mapping DTE to the best strategy's data
         """
-        # Get filtration criteria from config
+        if results_df.empty:
+            return {}
+            
+        # Get weights from config; fail gracefully if not defined
+        weights = self.config.get('composite_score_weights', {})
+        if not weights:
+            print("Warning: 'composite_score_weights' not found in config.yaml. Using default weights.")
+            weights = {
+                'roi': 0.30,
+                'return_mdd_ratio': 0.30,
+                'win_rate': 0.20,
+                'expectancy': 0.10,
+                'avg_profit_per_period': 0.10
+            }
+        
+        # Normalize metrics to be on a similar scale (0-100)
+        for metric in weights.keys():
+            if metric in results_df.columns:
+                min_val = results_df[metric].min()
+                max_val = results_df[metric].max()
+                if (max_val - min_val) > 0:
+                    results_df[f'{metric}_norm'] = 100 * (results_df[metric] - min_val) / (max_val - min_val)
+                else:
+                    results_df[f'{metric}_norm'] = 50  # Assign a neutral score if all values are the same
+        
+        # Calculate composite score
+        results_df['composite_score'] = 0
+        for metric, weight in weights.items():
+            if f'{metric}_norm' in results_df.columns:
+                results_df['composite_score'] += results_df[f'{metric}_norm'] * weight
+        
+        # Find the best strategy for each DTE
+        best_strategies_by_dte = {}
+        for dte in results_df['dte'].unique():
+            dte_df = results_df[results_df['dte'] == dte]
+            best_strategy = dte_df.loc[dte_df['composite_score'].idxmax()]
+            best_strategies_by_dte[dte] = best_strategy.to_dict()
+            
+        return best_strategies_by_dte
+
+    def filter_results(self, results_df):
+        """
+        Filter backtest results based on criteria in config.yaml.
+
+        [args]
+        results_df: pd.DataFrame with results for each parameter combination
+
+        [returns]
+        filtered_df: pd.DataFrame with viable strategies
+        """
+        if results_df.empty:
+            return pd.DataFrame()
+            
+        # Get filtration criteria from config; fail gracefully if not defined
         criteria = self.config.get('filtration_criteria', {})
+        if not criteria:
+            print("Warning: 'filtration_criteria' not found in config.yaml. Returning all strategies.")
+            return results_df
         
-        # Time-adjusted criteria for 1-month backtest as default values:
-        min_roi = criteria.get('min_roi', 3.0)
-        min_return_mdd = criteria.get('min_return_mdd', 6.0)
-        min_reward_risk = criteria.get('min_reward_risk', 1.2)
-        min_expectancy = criteria.get('min_expectancy', 0.4)
-        min_win_rate = criteria.get('min_win_rate', 62)
-        min_avg_profit_per_period = criteria.get('min_avg_profit_per_period', 0.1)
-        max_drawdown = criteria.get('max_drawdown', 2.0)
+        # Use criteria from config, with tolerant defaults if a key is missing
+        min_roi = criteria.get('min_roi', float('-inf'))
+        min_return_mdd = criteria.get('min_return_mdd', float('-inf'))
+        min_reward_risk = criteria.get('min_reward_risk', float('-inf'))
+        min_expectancy = criteria.get('min_expectancy', float('-inf'))
+        min_win_rate = criteria.get('min_win_rate', -1)
+        min_avg_profit_per_period = criteria.get('min_avg_profit_per_period', float('-inf'))
+        max_drawdown = criteria.get('max_drawdown', float('inf'))
         
-        filtered = results_df[
+        # Apply filters
+        filtered_df = results_df[
             (results_df['roi'] >= min_roi) &
             (results_df['return_mdd_ratio'] >= min_return_mdd) &
             (results_df['reward_risk'] >= min_reward_risk) &
@@ -865,4 +906,5 @@ class OptionsBacktester:
             (results_df['avg_profit_per_period'] >= min_avg_profit_per_period) &
             (results_df['max_drawdown'] <= max_drawdown)
         ]
-        return filtered.sort_values('roi', ascending=False)
+        
+        return filtered_df
